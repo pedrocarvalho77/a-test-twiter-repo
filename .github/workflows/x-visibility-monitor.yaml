@@ -53,6 +53,7 @@ jobs:
             # try widgets (two hosts)
             for host in "https://cdn.syndication.twimg.com" "https://syndication.twitter.com"; do
               curl -sS --compressed --http1.1 \
+                --connect-timeout 5 --max-time 10 \
                 -H "User-Agent: ${UA}" \
                 -H "Accept: application/json, text/javascript, */*; q=0.01" \
                 -H "Referer: https://platform.twitter.com/" \
@@ -65,7 +66,9 @@ jobs:
               fi
             done
             # fallback reader
-            curl -sS --compressed -L --http1.1 -H "User-Agent: ${UA}" \
+            curl -sS --compressed -L --http1.1 \
+              --connect-timeout 5 --max-time 10 \
+              -H "User-Agent: ${UA}" \
               "https://r.jina.ai/http://x.com/${USERNAME}" > out/profile.html || true
             if grep -qi "These posts are protected" out/profile.html; then
               echo "PRIVATE"; echo "reader:jina"; return
@@ -131,6 +134,7 @@ jobs:
             echo "$CUR_STATE" > out/state.txt
 
             echo "::endgroup::"
+            echo "tick $LOOP"
             sleep "${SLEEP_SECONDS}"
             LOOP=$((LOOP+1))
           done
