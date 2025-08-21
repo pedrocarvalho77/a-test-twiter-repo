@@ -45,6 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p out
           touch out/state.txt out/last_public_epoch.txt out/heartbeat_count.txt
           [ -f prev/state.txt ] && cp prev/state.txt out/state.txt || true
           [ -f prev/last_public_epoch.txt ] && cp prev/last_public_epoch.txt out/last_public_epoch.txt || true
