@@ -31,8 +31,6 @@ jobs:
         id: prev
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: x-visibility-monitor.yml
-          branch: main
           name: x-endpoint-${{ env.USERNAME }}
           path: prev
         continue-on-error: true
@@ -49,8 +47,10 @@ jobs:
           if [ -f prev/state.txt ]; then cp prev/state.txt out/state.txt; else echo "UNKNOWN" > out/state.txt; fi
 
           get_state() {
-            local TS=$(date -u +%s)
-            # try widgets (two hosts)
+            local TS
+            TS=$(date -u +%s)
+
+            # 1) widgets (only source allowed to assert PUBLIC)
             for host in "https://cdn.syndication.twimg.com" "https://syndication.twitter.com"; do
               curl -sS --compressed --http1.1 \
                 --connect-timeout 5 --max-time 10 \
@@ -65,17 +65,28 @@ jobs:
                 echo "PUBLIC"; echo "widgets:${host##https://}"; return
               fi
             done
-            # fallback reader
-            curl -sS --compressed -L --http1.1 \
-              --connect-timeout 5 --max-time 10 \
-              -H "User-Agent: ${UA}" \
-              "https://r.jina.ai/http://x.com/${USERNAME}" > out/profile.html || true
-            if grep -qi "These posts are protected" out/profile.html; then
+
+            # 2) reader fallback — NEVER asserts PUBLIC
+            local code size
+            code=$(curl -sS --compressed -L --http1.1 \
+                    --connect-timeout 5 --max-time 10 \
+                    -H "User-Agent: ${UA}" \
+                    -w "%{http_code}" \
+                    -o out/profile.html \
+                    "https://r.jina.ai/http://x.com/${USERNAME}" || true)
+            size=$(wc -c < out/profile.html || echo 0)
+
+            # bad status or tiny body ⇒ unknown
+            if [ "${code}" != "200" ] || [ "${size}" -lt 1500 ]; then
+              echo "UNKNOWN"; echo "reader:jina"; return
+            fi
+
+            if grep -qiE "These posts are protected|This account is protected" out/profile.html; then
               echo "PRIVATE"; echo "reader:jina"; return
-            elif grep -qi "This account doesn’t exist\|This account doesn't exist" out/profile.html; then
+            elif grep -qiE "This account doesn’t exist|This account doesn't exist" out/profile.html; then
               echo "MISSING"; echo "reader:jina"; return
             else
-              echo "PUBLIC"; echo "reader:jina"; return
+              echo "UNKNOWN"; echo "reader:jina"; return
             fi
           }
 
@@ -87,46 +98,45 @@ jobs:
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
             NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             NOW_PT="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
-            TEXT="⚙️ *[GitHub Actions LOOP]*\n\
-            Heartbeat 6h: *${HB_STATE}* • Fonte: ${HB_SRC}\n\
-            Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
-            🕒 Cadência simulada ~1min (loop interno)\n\n\
-            UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
+            TEXT="$(printf '⚙️ *[GitHub Actions LOOP]*\nHeartbeat 6h: *%s* • Fonte: %s\nPerfil: [@%s](https://x.com/%s)\n🕒 Cadência ~1/min (loop interno)\n\nUTC: %s\nLisboa: %s' \
+              "$HB_STATE" "$HB_SRC" "$USERNAME" "$USERNAME" "$NOW_UTC" "$NOW_PT")"
             curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
               --data-urlencode "text=${TEXT}" >/dev/null || true
           fi
 
-          # store heartbeat state as the "previous" baseline for the loop
+          # baseline for loop
           echo "${HB_STATE}" > out/state.txt
 
-          # -------- Minute loop: ONLY notify on transition to PUBLIC --------
+          # -------- Minute loop: ONLY notify on transition to PUBLIC (double-check) --------
           LOOP=1
           while [ $LOOP -le ${LOOPS} ]; do
-            NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
-            echo "::group::[${NOW_UTC}] Iteration $LOOP/${LOOPS}"
+            NOW_UTC_MIN="$(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "::group::[${NOW_UTC_MIN}] Iteration $LOOP/${LOOPS}"
 
             PREV_STATE="$(tr -d '\r\n' < out/state.txt || echo UNKNOWN)"
-
             mapfile -t RES < <(get_state)
             CUR_STATE="${RES[0]:-UNKNOWN}"
             SRC="${RES[1]:-unknown}"
             echo "Current: $CUR_STATE (via $SRC) | Previous: $PREV_STATE"
 
-            # Notify ONLY if we just transitioned to PUBLIC
+            # fire only on transition to PUBLIC, with second confirmation
             if [ "$CUR_STATE" = "PUBLIC" ] && [ "$PREV_STATE" != "PUBLIC" ]; then
-              if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-                NOW_UTC_TS="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-                NOW_PT_TS="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
-                TEXT="⚙️ *[GitHub Actions LOOP]*\n\
-                Estado: *PUBLIC* • Fonte: ${SRC}\n\
-                Motivo: Transição para PÚBLICO\n\
-                Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
-                🕒 Cadência simulada ~1min (loop interno)\n\n\
-                UTC: ${NOW_UTC_TS}\nLisboa: ${NOW_PT_TS}"
-                curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                  -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
-                  --data-urlencode "text=${TEXT}" >/dev/null || true
+              mapfile -t RES2 < <(get_state)
+              if [ "${RES2[0]:-UNKNOWN}" = "PUBLIC" ]; then
+                if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+                  NOW_UTC_TS="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+                  NOW_PT_TS="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
+                  TEXT2="$(printf '⚙️ *[GitHub Actions LOOP]*\nEstado: *PUBLIC* • Fonte: %s\nMotivo: Transição confirmada para PÚBLICO\nPerfil: [@%s](https://x.com/%s)\n🕒 Cadência ~1/min (loop interno)\n\nUTC: %s\nLisboa: %s' \
+                    "$SRC" "$USERNAME" "$USERNAME" "$NOW_UTC_TS" "$NOW_PT_TS")"
+                  curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                    -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
+                    --data-urlencode "text=${TEXT2}" >/dev/null || true
+                fi
+              else
+                echo "PUBLIC not confirmed on 2nd read — suppressing alert."
+                CUR_STATE="${RES2[0]:-UNKNOWN}"
+                SRC="${RES2[1]:-unknown}"
               fi
             fi
 
