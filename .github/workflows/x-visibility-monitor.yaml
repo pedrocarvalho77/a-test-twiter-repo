@@ -2,7 +2,7 @@ name: X visibility monitor (GitHub Actions)
 
 on:
   schedule:
-    - cron: "0 */6 * * *"    # kicks off a loop every 6h
+    - cron: "0 * * * *"       # arranca de hora a hora (UTC)
   workflow_dispatch:
 
 permissions:
@@ -16,16 +16,17 @@ concurrency:
 jobs:
   monitor-loop:
     runs-on: ubuntu-latest
+    timeout-minutes: 59          # margem antes do limite de 60 min por job
     env:
       USERNAME: ${{ secrets.X_USERNAME }}
       UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
-      LOOPS: "55"                  # ~55 minutes per run
-      SLEEP_SECONDS: "60"
+      WINDOW_MINUTES: "55"       # ~55 min de checks (quase contínuo)
+      SLEEP_SECONDS: "60"        # 1 pedido/min
     steps:
-      - name: Echo start (6h heartbeat)
+      - name: Echo start (hourly run)
         run: |
           echo "Start UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "This run is the 6h heartbeat."
+          echo "Hourly run with ~${WINDOW_MINUTES} min loop."
 
       - name: Download last state/artifacts (if exist)
         id: prev
@@ -35,7 +36,7 @@ jobs:
           path: prev
         continue-on-error: true
 
-      - name: Monitor loop (minute checks, notify only on 6h heartbeat or PUBLIC transition)
+      - name: Monitor loop (minute checks; heartbeat=arranque; alerta só quando muda para PUBLIC)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -43,14 +44,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          # seed state from last run if present
+          # Estado base
           if [ -f prev/state.txt ]; then cp prev/state.txt out/state.txt; else echo "UNKNOWN" > out/state.txt; fi
 
           get_state() {
             local TS
             TS=$(date -u +%s)
 
-            # 1) widgets (only source allowed to assert PUBLIC)
+            # 1) Widgets (única fonte que pode afirmar PUBLIC)
             for host in "https://cdn.syndication.twimg.com" "https://syndication.twitter.com"; do
               curl -sS --compressed --http1.1 \
                 --connect-timeout 5 --max-time 10 \
@@ -66,7 +67,7 @@ jobs:
               fi
             done
 
-            # 2) reader fallback — NEVER asserts PUBLIC
+            # 2) Reader fallback — NUNCA diz PUBLIC
             local code size
             code=$(curl -sS --compressed -L --http1.1 \
                     --connect-timeout 5 --max-time 10 \
@@ -76,11 +77,9 @@ jobs:
                     "https://r.jina.ai/http://x.com/${USERNAME}" || true)
             size=$(wc -c < out/profile.html || echo 0)
 
-            # bad status or tiny body ⇒ unknown
             if [ "${code}" != "200" ] || [ "${size}" -lt 1500 ]; then
               echo "UNKNOWN"; echo "reader:jina"; return
             fi
-
             if grep -qiE "These posts are protected|This account is protected" out/profile.html; then
               echo "PRIVATE"; echo "reader:jina"; return
             elif grep -qiE "This account doesn’t exist|This account doesn't exist" out/profile.html; then
@@ -90,29 +89,34 @@ jobs:
             fi
           }
 
-          # -------- 6h HEARTBEAT (one-time per run) --------
+          # Heartbeat no arranque (uma mensagem por hora a confirmar que corre)
           mapfile -t HB < <(get_state)
           HB_STATE="${HB[0]:-UNKNOWN}"
           HB_SRC="${HB[1]:-unknown}"
-
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
             NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             NOW_PT="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
-            TEXT="$(printf '⚙️ *[GitHub Actions LOOP]*\nHeartbeat 6h: *%s* • Fonte: %s\nPerfil: [@%s](https://x.com/%s)\n🕒 Cadência ~1/min (loop interno)\n\nUTC: %s\nLisboa: %s' \
+            TEXT="$(printf '⚙️ *[GitHub Actions LOOP]*\nHeartbeat 1h: *%s* • Fonte: %s\nPerfil: [@%s](https://x.com/%s)\n🕒 Cadência ~1/min (loop interno)\n\nUTC: %s\nLisboa: %s' \
               "$HB_STATE" "$HB_SRC" "$USERNAME" "$USERNAME" "$NOW_UTC" "$NOW_PT")"
             curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
               --data-urlencode "text=${TEXT}" >/dev/null || true
           fi
-
-          # baseline for loop
           echo "${HB_STATE}" > out/state.txt
 
-          # -------- Minute loop: ONLY notify on transition to PUBLIC (double-check) --------
-          LOOP=1
-          while [ $LOOP -le ${LOOPS} ]; do
+          # Loop com deadline (cobre ~55 min)
+          START_EPOCH=$(date -u +%s)
+          DEADLINE=$(( START_EPOCH + WINDOW_MINUTES*60 ))
+          ITER=1
+          while true; do
+            NOW=$(date -u +%s)
+            if [ "$NOW" -ge "$DEADLINE" ]; then
+              echo "Reached ${WINDOW_MINUTES} min window. Exiting."
+              break
+            fi
+
             NOW_UTC_MIN="$(date -u '+%Y-%m-%d %H:%M:%S')"
-            echo "::group::[${NOW_UTC_MIN}] Iteration $LOOP/${LOOPS}"
+            echo "::group::[${NOW_UTC_MIN}] Iteration ${ITER}"
 
             PREV_STATE="$(tr -d '\r\n' < out/state.txt || echo UNKNOWN)"
             mapfile -t RES < <(get_state)
@@ -120,7 +124,7 @@ jobs:
             SRC="${RES[1]:-unknown}"
             echo "Current: $CUR_STATE (via $SRC) | Previous: $PREV_STATE"
 
-            # fire only on transition to PUBLIC, with second confirmation
+            # Alertar só se transita para PUBLIC, com dupla confirmação
             if [ "$CUR_STATE" = "PUBLIC" ] && [ "$PREV_STATE" != "PUBLIC" ]; then
               mapfile -t RES2 < <(get_state)
               if [ "${RES2[0]:-UNKNOWN}" = "PUBLIC" ]; then
@@ -140,13 +144,11 @@ jobs:
               fi
             fi
 
-            # persist current for next iteration
             echo "$CUR_STATE" > out/state.txt
-
             echo "::endgroup::"
-            echo "tick $LOOP"
+            echo "tick ${ITER}"
+            ITER=$((ITER+1))
             sleep "${SLEEP_SECONDS}"
-            LOOP=$((LOOP+1))
           done
 
       - name: Upload artifacts (state persistence)
