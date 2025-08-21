@@ -2,8 +2,8 @@ name: X visibility monitor (GitHub Actions)
 
 on:
   schedule:
-    - cron: "0 */6 * * *"    # inicia um ciclo a cada 6h
-  workflow_dispatch:         # podes arrancar manualmente também
+    - cron: "0 */6 * * *"    # kicks off a loop every 6h
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -19,14 +19,13 @@ jobs:
     env:
       USERNAME: ${{ secrets.X_USERNAME }}
       UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
-      PUBLIC_PING_MIN: "0"         # 0 = envia sempre que PUBLIC; >0 = espaça (ex.: 5)
-      LOOPS: "55"                  # ~55 minutos por run
+      LOOPS: "55"                  # ~55 minutes per run
       SLEEP_SECONDS: "60"
     steps:
-      - name: Echo start (heartbeat 6h)
+      - name: Echo start (6h heartbeat)
         run: |
           echo "Start UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "Run acts as 6h heartbeat."
+          echo "This run is the 6h heartbeat."
 
       - name: Download last state/artifacts (if exist)
         id: prev
@@ -38,7 +37,7 @@ jobs:
           path: prev
         continue-on-error: true
 
-      - name: Monitor loop
+      - name: Monitor loop (minute checks, notify only on 6h heartbeat or PUBLIC transition)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -46,14 +45,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          touch out/state.txt out/last_public_epoch.txt out/heartbeat_count.txt
-          [ -f prev/state.txt ] && cp prev/state.txt out/state.txt || true
-          [ -f prev/last_public_epoch.txt ] && cp prev/last_public_epoch.txt out/last_public_epoch.txt || true
-          [ -f prev/heartbeat_count.txt ] && cp prev/heartbeat_count.txt out/heartbeat_count.txt || echo 0 > out/heartbeat_count.txt
+          # seed state from last run if present
+          if [ -f prev/state.txt ]; then cp prev/state.txt out/state.txt; else echo "UNKNOWN" > out/state.txt; fi
 
           get_state() {
             local TS=$(date -u +%s)
-            # tenta widgets (dois hosts)
+            # try widgets (two hosts)
             for host in "https://cdn.syndication.twimg.com" "https://syndication.twitter.com"; do
               curl -sS --compressed --http1.1 \
                 -H "User-Agent: ${UA}" \
@@ -79,68 +76,61 @@ jobs:
             fi
           }
 
+          # -------- 6h HEARTBEAT (one-time per run) --------
+          mapfile -t HB < <(get_state)
+          HB_STATE="${HB[0]:-UNKNOWN}"
+          HB_SRC="${HB[1]:-unknown}"
+
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            NOW_PT="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
+            TEXT="⚙️ *[GitHub Actions LOOP]*\n\
+Heartbeat 6h: *${HB_STATE}* • Fonte: ${HB_SRC}\n\
+Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
+🕒 Cadência simulada ~1min (loop interno)\n\n\
+UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
+              --data-urlencode "text=${TEXT}" >/dev/null || true
+          fi
+
+          # store heartbeat state as the "previous" baseline for the loop
+          echo "${HB_STATE}" > out/state.txt
+
+          # -------- Minute loop: ONLY notify on transition to PUBLIC --------
           LOOP=1
           while [ $LOOP -le ${LOOPS} ]; do
             NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
-            echo "::group::[${NOW_UTC}] Iteração $LOOP/${LOOPS}"
+            echo "::group::[${NOW_UTC}] Iteration $LOOP/${LOOPS}"
 
-            # ler estado anterior
             PREV_STATE="$(tr -d '\r\n' < out/state.txt || echo UNKNOWN)"
-            LAST_SENT="$(tr -d '\r\n' < out/last_public_epoch.txt || echo 0)"
-            HB_COUNT="$(tr -d '\r\n' < out/heartbeat_count.txt || echo 0)"
 
-            # obter estado atual
             mapfile -t RES < <(get_state)
             CUR_STATE="${RES[0]:-UNKNOWN}"
             SRC="${RES[1]:-unknown}"
-            echo "Estado atual: $CUR_STATE (via $SRC) | anterior: $PREV_STATE"
+            echo "Current: $CUR_STATE (via $SRC) | Previous: $PREV_STATE"
 
-            # decidir envio
-            SHOULD="false"; REASON=""
-            NOW_EPOCH=$(date -u +%s)
-
-            # enviar enquanto PUBLIC (com espaçamento opcional)
-            if [ "$CUR_STATE" = "PUBLIC" ]; then
-              if [ "${PUBLIC_PING_MIN}" = "0" ]; then
-                SHOULD="true"; REASON="PUBLIC (contínuo)"
-              else
-                DELTA=$(( NOW_EPOCH - LAST_SENT ))
-                if [ $DELTA -ge $(( PUBLIC_PING_MIN * 60 )) ]; then
-                  SHOULD="true"; REASON="PUBLIC (intervalo atingido)"
-                fi
+            # Notify ONLY if we just transitioned to PUBLIC
+            if [ "$CUR_STATE" = "PUBLIC" ] && [ "$PREV_STATE" != "PUBLIC" ]; then
+              if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+                NOW_UTC_TS="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+                NOW_PT_TS="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
+                TEXT="⚙️ *[GitHub Actions LOOP]*\n\
+Estado: *PUBLIC* • Fonte: ${SRC}\n\
+Motivo: Transição para PÚBLICO\n\
+Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
+🕒 Cadência simulada ~1min (loop interno)\n\n\
+UTC: ${NOW_UTC_TS}\nLisboa: ${NOW_PT_TS}"
+                curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
+                  --data-urlencode "text=${TEXT}" >/dev/null || true
               fi
             fi
 
-            # forçar 4 heartbeats iniciais (independente do estado)
-            if [ "$HB_COUNT" -lt 4 ]; then
-              SHOULD="true"; REASON="Heartbeat $((HB_COUNT+1))/4"
-            fi
-
-            if [ "$SHOULD" = "true" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-              NOW_PT="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
-              TEXT="⚙️ *[GitHub Actions LOOP]*\n\
-            Estado: *${CUR_STATE}* • Fonte: ${SRC}\n\
-            Motivo: ${REASON}\n\
-            Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
-            🕒 Cadência simulada ~1min (loop interno)\n\n\
-            UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
-
-              curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                -d parse_mode="Markdown" \
-                --data-urlencode "text=${TEXT}" >/dev/null || true
-              # atualizar marcadores
-              if [ "$CUR_STATE" = "PUBLIC" ]; then echo "$NOW_EPOCH" > out/last_public_epoch.txt; fi
-              echo $((HB_COUNT+1)) > out/heartbeat_count.txt
-              echo "Mensagem enviada. HB=$((HB_COUNT+1))"
-            fi
-
-            # persistir estado atual
+            # persist current for next iteration
             echo "$CUR_STATE" > out/state.txt
 
             echo "::endgroup::"
-            # dormir até próxima iteração
             sleep "${SLEEP_SECONDS}"
             LOOP=$((LOOP+1))
           done
@@ -151,7 +141,5 @@ jobs:
           name: x-endpoint-${{ env.USERNAME }}
           path: |
             out/state.txt
-            out/last_public_epoch.txt
-            out/heartbeat_count.txt
             out/profile.html
             out/widgets.json
