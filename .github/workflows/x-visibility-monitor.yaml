@@ -1,0 +1,147 @@
+name: X visibility monitor (GitHub Actions)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"    # inicia um ciclo a cada 6h
+  workflow_dispatch:         # podes arrancar manualmente também
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: x-visibility-monitor
+  cancel-in-progress: true
+
+jobs:
+  monitor-loop:
+    runs-on: ubuntu-latest
+    env:
+      USERNAME: ${{ secrets.X_USERNAME }}
+      UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+      PUBLIC_PING_MIN: "0"         # 0 = envia sempre que PUBLIC; >0 = espaça (ex.: 5)
+      LOOPS: "55"                  # ~55 minutos por run
+      SLEEP_SECONDS: "60"
+    steps:
+      - name: Echo start (heartbeat 6h)
+        run: |
+          echo "Start UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "Run acts as 6h heartbeat."
+
+      - name: Download last state/artifacts (if exist)
+        id: prev
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: x-visibility-monitor.yml
+          branch: main
+          name: x-endpoint-${{ env.USERNAME }}
+          path: prev
+        continue-on-error: true
+
+      - name: Monitor loop
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch out/state.txt out/last_public_epoch.txt out/heartbeat_count.txt
+          [ -f prev/state.txt ] && cp prev/state.txt out/state.txt || true
+          [ -f prev/last_public_epoch.txt ] && cp prev/last_public_epoch.txt out/last_public_epoch.txt || true
+          [ -f prev/heartbeat_count.txt ] && cp prev/heartbeat_count.txt out/heartbeat_count.txt || echo 0 > out/heartbeat_count.txt
+
+          get_state() {
+            local TS=$(date -u +%s)
+            # tenta widgets (dois hosts)
+            for host in "https://cdn.syndication.twimg.com" "https://syndication.twitter.com"; do
+              curl -sS --compressed --http1.1 \
+                -H "User-Agent: ${UA}" \
+                -H "Accept: application/json, text/javascript, */*; q=0.01" \
+                -H "Referer: https://platform.twitter.com/" \
+                "${host}/widgets/followbutton/info.json?screen_names=${USERNAME}&_=${TS}" \
+                -o out/widgets.json || true
+              if grep -qE '"protected"\s*:\s*true' out/widgets.json; then
+                echo "PRIVATE"; echo "widgets:${host##https://}"; return
+              elif grep -qE '"protected"\s*:\s*false' out/widgets.json; then
+                echo "PUBLIC"; echo "widgets:${host##https://}"; return
+              fi
+            done
+            # fallback reader
+            curl -sS --compressed -L --http1.1 -H "User-Agent: ${UA}" \
+              "https://r.jina.ai/http://x.com/${USERNAME}" > out/profile.html || true
+            if grep -qi "These posts are protected" out/profile.html; then
+              echo "PRIVATE"; echo "reader:jina"; return
+            elif grep -qi "This account doesn’t exist\|This account doesn't exist" out/profile.html; then
+              echo "MISSING"; echo "reader:jina"; return
+            else
+              echo "PUBLIC"; echo "reader:jina"; return
+            fi
+          }
+
+          LOOP=1
+          while [ $LOOP -le ${LOOPS} ]; do
+            NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "::group::[${NOW_UTC}] Iteração $LOOP/${LOOPS}"
+
+            # ler estado anterior
+            PREV_STATE="$(tr -d '\r\n' < out/state.txt || echo UNKNOWN)"
+            LAST_SENT="$(tr -d '\r\n' < out/last_public_epoch.txt || echo 0)"
+            HB_COUNT="$(tr -d '\r\n' < out/heartbeat_count.txt || echo 0)"
+
+            # obter estado atual
+            mapfile -t RES < <(get_state)
+            CUR_STATE="${RES[0]:-UNKNOWN}"
+            SRC="${RES[1]:-unknown}"
+            echo "Estado atual: $CUR_STATE (via $SRC) | anterior: $PREV_STATE"
+
+            # decidir envio
+            SHOULD="false"; REASON=""
+            NOW_EPOCH=$(date -u +%s)
+
+            # enviar enquanto PUBLIC (com espaçamento opcional)
+            if [ "$CUR_STATE" = "PUBLIC" ]; then
+              if [ "${PUBLIC_PING_MIN}" = "0" ]; then
+                SHOULD="true"; REASON="PUBLIC (contínuo)"
+              else
+                DELTA=$(( NOW_EPOCH - LAST_SENT ))
+                if [ $DELTA -ge $(( PUBLIC_PING_MIN * 60 )) ]; then
+                  SHOULD="true"; REASON="PUBLIC (intervalo atingido)"
+                fi
+              fi
+            fi
+
+            # forçar 4 heartbeats iniciais (independente do estado)
+            if [ "$HB_COUNT" -lt 4 ]; then
+              SHOULD="true"; REASON="Heartbeat $((HB_COUNT+1))/4"
+            fi
+
+            if [ "$SHOULD" = "true" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+              TEXT="ℹ️ Estado: *${CUR_STATE}* • Fonte: ${SRC}\nMotivo: ${REASON}\nPerfil [@${USERNAME}](https://x.com/${USERNAME})\n_(GitHub Actions loop)_"
+              curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
+                --data-urlencode "text=${TEXT}" >/dev/null || true
+              # atualizar marcadores
+              if [ "$CUR_STATE" = "PUBLIC" ]; then echo "$NOW_EPOCH" > out/last_public_epoch.txt; fi
+              echo $((HB_COUNT+1)) > out/heartbeat_count.txt
+              echo "Mensagem enviada. HB=$((HB_COUNT+1))"
+            fi
+
+            # persistir estado atual
+            echo "$CUR_STATE" > out/state.txt
+
+            echo "::endgroup::"
+            # dormir até próxima iteração
+            sleep "${SLEEP_SECONDS}"
+            LOOP=$((LOOP+1))
+          done
+
+      - name: Upload artifacts (state persistence)
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-endpoint-${{ env.USERNAME }}
+          path: |
+            out/state.txt
+            out/last_public_epoch.txt
+            out/heartbeat_count.txt
+            out/profile.html
+            out/widgets.json
