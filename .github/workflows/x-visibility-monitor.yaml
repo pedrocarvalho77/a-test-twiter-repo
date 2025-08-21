@@ -117,9 +117,18 @@ jobs:
             fi
 
             if [ "$SHOULD" = "true" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              TEXT="ℹ️ Estado: *${CUR_STATE}* • Fonte: ${SRC}\nMotivo: ${REASON}\nPerfil [@${USERNAME}](https://x.com/${USERNAME})\n_(GitHub Actions loop)_"
+              NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              NOW_PT="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
+              TEXT="⚙️ *[GitHub Actions LOOP]*\n\
+            Estado: *${CUR_STATE}* • Fonte: ${SRC}\n\
+            Motivo: ${REASON}\n\
+            Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
+            🕒 Cadência simulada ~1min (loop interno)\n\n\
+            UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
+
               curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                -d parse_mode="Markdown" \
                 --data-urlencode "text=${TEXT}" >/dev/null || true
               # atualizar marcadores
               if [ "$CUR_STATE" = "PUBLIC" ]; then echo "$NOW_EPOCH" > out/last_public_epoch.txt; fi
