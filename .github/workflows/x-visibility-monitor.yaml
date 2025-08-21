@@ -85,10 +85,10 @@ jobs:
             NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             NOW_PT="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
             TEXT="⚙️ *[GitHub Actions LOOP]*\n\
-Heartbeat 6h: *${HB_STATE}* • Fonte: ${HB_SRC}\n\
-Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
-🕒 Cadência simulada ~1min (loop interno)\n\n\
-UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
+            Heartbeat 6h: *${HB_STATE}* • Fonte: ${HB_SRC}\n\
+            Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
+            🕒 Cadência simulada ~1min (loop interno)\n\n\
+            UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
             curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
               --data-urlencode "text=${TEXT}" >/dev/null || true
@@ -116,11 +116,11 @@ UTC: ${NOW_UTC}\nLisboa: ${NOW_PT}"
                 NOW_UTC_TS="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
                 NOW_PT_TS="$(TZ=Europe/Lisbon date '+%Y-%m-%d %H:%M:%S %Z')"
                 TEXT="⚙️ *[GitHub Actions LOOP]*\n\
-Estado: *PUBLIC* • Fonte: ${SRC}\n\
-Motivo: Transição para PÚBLICO\n\
-Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
-🕒 Cadência simulada ~1min (loop interno)\n\n\
-UTC: ${NOW_UTC_TS}\nLisboa: ${NOW_PT_TS}"
+                Estado: *PUBLIC* • Fonte: ${SRC}\n\
+                Motivo: Transição para PÚBLICO\n\
+                Perfil: [@${USERNAME}](https://x.com/${USERNAME})\n\
+                🕒 Cadência simulada ~1min (loop interno)\n\n\
+                UTC: ${NOW_UTC_TS}\nLisboa: ${NOW_PT_TS}"
                 curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                   -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="Markdown" \
                   --data-urlencode "text=${TEXT}" >/dev/null || true
